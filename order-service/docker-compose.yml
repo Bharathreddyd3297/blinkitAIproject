@@ -1,0 +1,70 @@
+# =============================================================================
+# order-service — standalone Compose file
+# -----------------------------------------------------------------------------
+# Runs order-service + its dedicated Postgres in isolation. For the full
+# platform (auth + product + cart + order + their DBs on a shared network) use
+# the root-level docker-compose.platform.yml instead.
+#
+# Secrets are sourced from a sibling `.env` file (copy from .env.example).
+# JWT_SECRET MUST match the value used by auth-service / product-service /
+# cart-service so the shared distributed-trust model holds.
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: blinkit-order-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-blinkit_orders}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5435:5432"
+    volumes:
+      - order_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-blinkit_orders}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  order-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: blinkit/order-service:1.0.0
+    container_name: blinkit-order-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-blinkit_orders}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # MUST be the exact same secret used by auth-service / product-service / cart-service.
+      JWT_SECRET: ${JWT_SECRET}
+      CART_SERVICE_BASE_URL: ${CART_SERVICE_BASE_URL:-http://cart-service:8083}
+      PRODUCT_SERVICE_BASE_URL: ${PRODUCT_SERVICE_BASE_URL:-http://product-service:8082}
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    ports:
+      - "8084:8084"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8084/actuator/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - blinkit-net
+
+volumes:
+  order_postgres_data:
+
+networks:
+  blinkit-net:
+    driver: bridge
+    name: blinkit-net

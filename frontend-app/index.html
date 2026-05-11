@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#070818" />
+    <meta name="color-scheme" content="dark" />
+
+    <meta name="description" content="Blinkit — a premium, AI-powered cloud-native ecommerce experience." />
+    <meta name="application-name" content="Blinkit" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+
+    <!-- Social -->
+    <meta property="og:title" content="Blinkit — AI-powered ecommerce" />
+    <meta property="og:description" content="A premium futuristic AI-powered ecommerce experience." />
+    <meta property="og:type" content="website" />
+
+    <!-- Preconnect for fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
+    <title>Blinkit — Premium AI Commerce</title>
+
+    <style>
+      /* Pre-hydration boot screen — keeps the first paint cinematic */
+      html, body { background-color: #070818; color: #dde2ee; }
+      .boot-screen {
+        position: fixed; inset: 0; z-index: 9999;
+        display: grid; place-items: center;
+        background:
+          radial-gradient(at 20% 20%, rgba(155, 107, 255, 0.35) 0px, transparent 50%),
+          radial-gradient(at 80% 0%,  rgba(34, 226, 255, 0.25) 0px, transparent 50%),
+          radial-gradient(at 50% 100%, rgba(255, 82, 217, 0.22) 0px, transparent 50%),
+          #070818;
+      }
+      .boot-mark {
+        font-family: 'Space Grotesk', system-ui, sans-serif;
+        font-weight: 600; letter-spacing: 0.18em; font-size: 0.85rem;
+        color: rgba(221, 226, 238, 0.85);
+        text-transform: uppercase;
+        animation: bootPulse 1.6s ease-in-out infinite;
+      }
+      @keyframes bootPulse {
+        0%, 100% { opacity: 0.55; }
+        50%      { opacity: 1; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="boot-screen" aria-label="Loading Blinkit">
+        <div class="boot-mark">BLINKIT · INITIALIZING</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

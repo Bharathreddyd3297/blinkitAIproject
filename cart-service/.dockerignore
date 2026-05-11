@@ -1,0 +1,13 @@
+target/
+.idea/
+.vscode/
+*.iml
+*.log
+.git/
+.gitignore
+.env
+.env.local
+README.md
+API_REQUESTS.md
+HELP.md
+**/.DS_Store

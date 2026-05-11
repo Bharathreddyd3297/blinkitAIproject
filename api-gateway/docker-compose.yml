@@ -1,0 +1,66 @@
+# =============================================================================
+# api-gateway — isolated Compose file (gateway + Redis only)
+# -----------------------------------------------------------------------------
+# Use this to bring up the gateway and a co-located Redis without booting
+# the entire platform. Useful for filter / routing / rate-limit smoke tests.
+# Downstream services are NOT started here — the gateway will return
+# 503 SERVICE_UNAVAILABLE for routes whose target is offline, which is the
+# correct behaviour and is itself worth verifying.
+#
+# To run the full stack instead, use the workspace-root file:
+#   docker compose -f ../docker-compose.platform.yml up --build
+# =============================================================================
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: blinkit-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: blinkit/api-gateway:1.0.0
+    container_name: api-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-100}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-http://auth-service:8081}
+      PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL:-http://product-service:8082}
+      CART_SERVICE_URL: ${CART_SERVICE_URL:-http://cart-service:8083}
+      ORDER_SERVICE_URL: ${ORDER_SERVICE_URL:-http://order-service:8084}
+      PAYMENT_SERVICE_URL: ${PAYMENT_SERVICE_URL:-http://payment-service:8085}
+      AI_RECOMMENDATION_SERVICE_URL: ${AI_RECOMMENDATION_SERVICE_URL:-http://ai-recommendation-service:8090}
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - blinkit-net
+
+volumes:
+  redis_data:
+
+networks:
+  blinkit-net:
+    driver: bridge
+    name: blinkit-net

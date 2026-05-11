@@ -1,0 +1,62 @@
+# =============================================================================
+# auth-service — standalone Compose file
+# -----------------------------------------------------------------------------
+# Runs auth-service + its dedicated Postgres in isolation. For the full
+# platform (auth + product + cart + their DBs on a shared network) use the
+# root-level docker-compose.platform.yml instead.
+#
+# Secrets are sourced from a sibling `.env` file (copy from
+# ../.env.example). Compose auto-loads `.env` from the directory you invoke
+# it in; pass `--env-file ../.env` if you want to point at the workspace
+# root file.
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: blinkit-postgres
+    environment:
+      POSTGRES_DB: blinkit_auth
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/blinkit_auth
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # MUST be the same JWT_SECRET as product-service and cart-service.
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - blinkit-net
+
+volumes:
+  postgres_data:
+
+networks:
+  blinkit-net:
+    driver: bridge
+    name: blinkit-net

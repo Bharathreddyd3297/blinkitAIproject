@@ -1,0 +1,32 @@
+# ============================================================================
+# Blinkit AI Recommendation Service — runtime + dev dependencies
+# ----------------------------------------------------------------------------
+# Pinned to compatible upper bounds. numpy is held below 2.x because some
+# transitive dependencies (notably torch wheels for sentence-transformers
+# on certain platforms) are still on 1.x ABI.
+# ============================================================================
+
+# --- Web framework ---
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.32,<0.33
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+python-dotenv>=1.0,<2.0
+
+# --- HTTP client (cross-service) ---
+httpx>=0.27,<0.28
+
+# --- Cache ---
+redis>=5.1,<6.0
+
+# --- ML / similarity ---
+sentence-transformers>=3.0,<4.0
+scikit-learn>=1.5,<2.0
+pandas>=2.2,<3.0
+numpy>=1.26,<2.0
+
+# --- Tests ---
+pytest>=8.3,<9.0
+pytest-asyncio>=0.24,<0.25
+respx>=0.21,<0.22
+fakeredis>=2.24,<3.0

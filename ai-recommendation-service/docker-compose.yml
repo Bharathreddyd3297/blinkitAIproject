@@ -1,0 +1,74 @@
+# =============================================================================
+# Blinkit AI Recommendation Service — isolated Compose file
+# -----------------------------------------------------------------------------
+# This file lets the recommendation service run on its own for development
+# (without bringing up the entire platform). It still joins the platform's
+# `blinkit-net` network as `external` so it can reach the existing `redis`
+# and `product-service` containers if they are already running.
+#
+# Typical workflows
+# -----------------
+# 1) Full platform — the recommendation service is also wired into the
+#    workspace-root `docker-compose.platform.yml` (planned addition; this
+#    file mirrors that wiring exactly so it can be merged with no churn).
+#
+# 2) Standalone dev — start `redis` and `product-service` from the
+#    platform compose, then run:
+#       docker compose -f ai-recommendation-service/docker-compose.yml up --build
+#
+# Container DNS uses service names: `redis`, `product-service`. Never
+# `localhost` from inside containers.
+# =============================================================================
+
+services:
+
+  ai-recommendation-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: blinkit/ai-recommendation-service:1.0.0
+    container_name: ai-recommendation-service
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      SERVICE_NAME: ai-recommendation-service
+      SERVICE_PORT: 8090
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      PRODUCT_SERVICE_BASE_URL: ${PRODUCT_SERVICE_BASE_URL:-http://product-service:8082}
+      PRODUCT_SERVICE_TIMEOUT_SECONDS: ${PRODUCT_SERVICE_TIMEOUT_SECONDS:-5}
+      PRODUCT_SERVICE_PAGE_SIZE: ${PRODUCT_SERVICE_PAGE_SIZE:-100}
+      INTERNAL_SERVICE_JWT: ${INTERNAL_SERVICE_JWT:-}
+
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-reco}
+
+      TTL_TRENDING_SECONDS: ${TTL_TRENDING_SECONDS:-300}
+      TTL_RELATED_SECONDS: ${TTL_RELATED_SECONDS:-3600}
+      TTL_FREQUENTLY_BOUGHT_SECONDS: ${TTL_FREQUENTLY_BOUGHT_SECONDS:-3600}
+      TTL_USER_SECONDS: ${TTL_USER_SECONDS:-300}
+      TTL_CATALOG_SNAPSHOT_SECONDS: ${TTL_CATALOG_SNAPSHOT_SECONDS:-600}
+
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-auto}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8090/health/liveness || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - blinkit-net
+
+# Reuse the existing platform network. When this file is started after
+# `docker-compose.platform.yml`, it joins the same bridge so the service
+# can reach `redis` and `product-service` by DNS.
+networks:
+  blinkit-net:
+    external: true
+    name: blinkit-net

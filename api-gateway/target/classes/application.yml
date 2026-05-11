@@ -1,0 +1,193 @@
+# =============================================================================
+# Blinkit API Gateway
+# -----------------------------------------------------------------------------
+# Single ingress for all external traffic into the Blinkit microservices
+# platform. Routes /api/** to the correct downstream service via Docker DNS,
+# pre-validates the inbound JWT against the shared HS512 secret, and applies
+# a Redis-backed per-IP rate limit.
+#
+# All env vars have safe dev fallbacks; production is driven entirely by env.
+# =============================================================================
+
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+
+  # Reactive Redis client used by the rate-limit filter. If Redis is down,
+  # RateLimitGlobalFilter logs the error and lets the request through —
+  # rate limiting must NEVER break platform traffic.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 1s
+      connect-timeout: 2s
+      lettuce:
+        shutdown-timeout: 200ms
+
+  cloud:
+    gateway:
+      # Global CORS — the React frontend (Vite :5173 / CRA :3000) is the
+      # only public origin. Add prod origins here when the frontend is
+      # deployed to AKS.
+      # `add-to-simple-url-handler-mapping=true` makes preflight OPTIONS
+      # requests bypass route matching (otherwise an unrouted OPTIONS would
+      # 404 before the CORS filter ever sees it).
+      globalcors:
+        add-to-simple-url-handler-mapping: true
+        cors-configurations:
+          '[/**]':
+            allowedOrigins:
+              - http://localhost:3000
+              - http://localhost:5173
+            allowedMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+            # Every non-simple header the frontend can send must be listed,
+            # otherwise the browser drops the preflight (and Spring Cloud
+            # Gateway's CORS filter then skips writing Access-Control-Allow-*
+            # on the rejection — surfacing as "No Allow-Origin header"
+            # downstream). The frontend axios instance sets Accept + X-Client
+            # by default, the request interceptor adds X-Request-Id for tracing,
+            # and Authorization is added once a session exists.
+            allowedHeaders:
+              - Authorization
+              - Content-Type
+              - Accept
+              - X-Client
+              - X-Request-Id
+            exposedHeaders:
+              - X-Request-Id
+            allowCredentials: true
+            maxAge: 3600
+
+      # Default filters applied to EVERY route. The Authorization header is
+      # already on the inbound request — Spring Cloud Gateway forwards all
+      # headers by default, so we don't need an explicit "AddRequestHeader".
+      #
+      # RETAIN_FIRST (was RETAIN_UNIQUE) for the CORS headers: when a
+      # downstream service also emits Access-Control-Allow-Origin (e.g. the
+      # FastAPI recommendation service used to), RETAIN_UNIQUE concatenated
+      # both values (`http://localhost:5173, *`) and browsers rejected the
+      # response. The gateway is the CORS contract boundary, and Spring Cloud
+      # Gateway's CorsWebFilter writes its header first, so RETAIN_FIRST is
+      # always the correct value.
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_FIRST
+
+      # Routes — Docker DNS hostnames match the compose service keys.
+      # The downstream service still validates the JWT independently
+      # (defense in depth — the gateway is not the trust boundary).
+      routes:
+        - id: auth-service
+          uri: ${AUTH_SERVICE_URL:http://auth-service:8081}
+          predicates:
+            - Path=/api/auth/**
+
+        - id: product-service-products
+          uri: ${PRODUCT_SERVICE_URL:http://product-service:8082}
+          predicates:
+            - Path=/api/products/**
+
+        - id: product-service-categories
+          uri: ${PRODUCT_SERVICE_URL:http://product-service:8082}
+          predicates:
+            - Path=/api/categories/**
+
+        - id: cart-service
+          uri: ${CART_SERVICE_URL:http://cart-service:8083}
+          predicates:
+            - Path=/api/cart/**
+
+        - id: order-service
+          uri: ${ORDER_SERVICE_URL:http://order-service:8084}
+          predicates:
+            - Path=/api/orders/**
+
+        - id: payment-service
+          uri: ${PAYMENT_SERVICE_URL:http://payment-service:8085}
+          predicates:
+            - Path=/api/payments/**
+
+        - id: ai-recommendation-service
+          uri: ${AI_RECOMMENDATION_SERVICE_URL:http://ai-recommendation-service:8090}
+          predicates:
+            - Path=/api/recommendations/**
+
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: 10s
+
+# -----------------------------------------------------------------------------
+# Gateway-owned configuration
+# -----------------------------------------------------------------------------
+gateway:
+  # Shared HS512 secret. Identical value in every Blinkit service. >= 64 bytes.
+  # auth-service issues; api-gateway + every downstream service validate.
+  jwt:
+    secret: ${JWT_SECRET:defaultDevelopmentSecretdefaultDevelopmentSecretdefaultDevelopmentSecret}
+
+  # Public paths — no JWT required. Everything else requires a valid token.
+  # Match-style is Ant patterns; matched by JwtAuthenticationGlobalFilter.
+  security:
+    public-paths:
+      - /api/auth/**
+      - /actuator/**
+      - /actuator
+      - /health/**
+      - /health
+      - /swagger-ui/**
+      - /swagger-ui.html
+      - /v3/api-docs/**
+      - /v3/api-docs
+      - /webjars/**
+      - /favicon.ico
+
+  # Per-IP fixed-window rate limit. Key: gw:ratelimit:{ip}:{epochMinute}.
+  # On Redis failure the filter logs and allows the request — see
+  # RateLimitGlobalFilter#filter.
+  ratelimit:
+    enabled: true
+    requests-per-minute: ${RATE_LIMIT_RPM:100}
+    redis-key-prefix: gw:ratelimit
+
+# -----------------------------------------------------------------------------
+# Observability
+# -----------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, gateway, metrics
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true
+    gateway:
+      enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+    redis:
+      # The gateway must come up even if Redis is temporarily unreachable.
+      enabled: false
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+logging:
+  level:
+    root: INFO
+    com.blinkit.apigateway: INFO
+    org.springframework.cloud.gateway: INFO
+    reactor.netty: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"

@@ -1,0 +1,76 @@
+# =============================================================================
+# payment-service — standalone Compose file
+# -----------------------------------------------------------------------------
+# Runs payment-service + its dedicated Postgres in isolation. For the full
+# platform (auth + product + cart + order + payment + their DBs on a shared
+# network) use the root-level docker-compose.platform.yml instead.
+#
+# Secrets are sourced from a sibling `.env` file (copy from .env.example).
+# JWT_SECRET MUST match the value used by auth-service / product-service /
+# cart-service / order-service so the shared distributed-trust model holds.
+#
+# Postgres exposes host port 5436 (container 5432) — distinct from the other
+# services' DBs (auth=5432, product=5433, cart=5434, order=5435).
+# init-db.sql is mounted into /docker-entrypoint-initdb.d so the
+# blinkit_payments database is created automatically on first volume init.
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: blinkit-payment-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-blinkit_payments}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5436:5432"
+    volumes:
+      - payment_postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-blinkit_payments}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: blinkit/payment-service:1.0.0
+    container_name: blinkit-payment-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-blinkit_payments}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # MUST be the exact same secret used by auth-service / product-service / cart-service / order-service.
+      JWT_SECRET: ${JWT_SECRET}
+      ORDER_SERVICE_BASE_URL: ${ORDER_SERVICE_BASE_URL:-http://order-service:8084}
+      PAYMENT_SUCCESS_RATE_PERCENT: ${PAYMENT_SUCCESS_RATE_PERCENT:-80}
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8085/actuator/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - blinkit-net
+
+volumes:
+  payment_postgres_data:
+
+networks:
+  blinkit-net:
+    driver: bridge
+    name: blinkit-net

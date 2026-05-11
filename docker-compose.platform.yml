@@ -1,0 +1,440 @@
+# =============================================================================
+# Blinkit Platform — full stack Compose file
+# -----------------------------------------------------------------------------
+# Brings up the entire Blinkit microservices platform:
+#   - postgres-auth      : Postgres for auth-service          (host:5432)
+#   - postgres-products  : Postgres for product-service       (host:5433)
+#   - postgres-cart      : Postgres for cart-service          (host:5434)
+#   - postgres-orders    : Postgres for order-service         (host:5435)
+#   - postgres-payment   : Postgres for payment-service       (host:5436)
+#   - redis              : shared cache (Phase-1: product-svc) (host:6379)
+#   - auth-service       : token issuer                       (host:8081)
+#   - product-service    : product catalogue + inventory      (host:8082)
+#   - cart-service       : shopping cart, calls product-svc   (host:8083)
+#   - order-service      : orders, calls cart + product-svc   (host:8084)
+#   - payment-service    : simulated payments, calls order-svc (host:8085)
+#   - ai-recommendation-service : FastAPI, calls product-svc  (host:8090)
+#   - api-gateway        : single ingress for the React FE     (host:8080)
+#
+# Run from the workspace root:
+#   cp .env.example .env
+#   docker compose -f docker-compose.platform.yml up --build
+#
+# A single `JWT_SECRET` from .env is injected into every service so token
+# signing (auth-service) and token validation (product, cart, order, payment)
+# all share the exact same key. This is the foundation of the platform's
+# stateless distributed authentication / microservice trust model.
+#
+# Service-to-service hostnames are the compose service keys (Docker DNS):
+#   cart-service     -> http://product-service:8082
+#   order-service    -> http://cart-service:8083, http://product-service:8082
+#   payment-service  -> http://order-service:8084
+#
+# When this stack moves to AKS:
+#   - The blinkit-net bridge network becomes a Kubernetes Service mesh
+#     (with internal DNS names matching the service names below).
+#   - .env is replaced by a Kubernetes Secret named e.g. `blinkit-platform`,
+#     mounted as env vars on each Deployment.
+#   - Postgres instances are replaced by Azure Database for PostgreSQL
+#     (Flexible Server), wired through SPRING_DATASOURCE_URL.
+#   - An API Gateway (Spring Cloud Gateway / Azure Application Gateway /
+#     Azure API Management) sits in front of these services and is the only
+#     entry point exposed externally.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Databases — one per service (database-per-service pattern)
+  # ---------------------------------------------------------------------------
+  postgres-auth:
+    image: postgres:16-alpine
+    container_name: postgres-auth
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blinkit_auth
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - auth_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d blinkit_auth"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  postgres-products:
+    image: postgres:16-alpine
+    container_name: postgres-products
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blinkit_products
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5433:5432"
+    volumes:
+      - product_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d blinkit_products"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  postgres-cart:
+    image: postgres:16-alpine
+    container_name: postgres-cart
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blinkit_cart
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5434:5432"
+    volumes:
+      - cart_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d blinkit_cart"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  postgres-orders:
+    image: postgres:16-alpine
+    container_name: postgres-orders
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blinkit_orders
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5435:5432"
+    volumes:
+      - order_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d blinkit_orders"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # Redis — Phase-1 distributed cache.
+  # Currently consumed by product-service only (cache-aside pattern over the
+  # product catalogue). Designed to grow to cart, payment, recommendation and
+  # gateway rate-limiting; see REDIS_INTEGRATION_PLAN.md.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: blinkit-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  postgres-payment:
+    image: postgres:17-alpine
+    container_name: postgres-payment
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blinkit_payments
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5436:5432"
+    volumes:
+      - payment_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d blinkit_payments"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # auth-service — sole token issuer, signs JWTs with the shared JWT_SECRET
+  # ---------------------------------------------------------------------------
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    image: blinkit/auth-service:1.0.0
+    container_name: auth-service
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-auth:5432/blinkit_auth
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    depends_on:
+      postgres-auth:
+        condition: service_healthy
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # product-service — validates JWTs with the same JWT_SECRET as auth-service
+  # ---------------------------------------------------------------------------
+  product-service:
+    build:
+      context: ./product-service
+      dockerfile: Dockerfile
+    image: blinkit/product-service:1.0.0
+    container_name: product-service
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-products:5432/blinkit_products
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    depends_on:
+      postgres-products:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # cart-service — validates JWTs and forwards the Authorization header on
+  # every outbound call to product-service (see ProductServiceClient).
+  # ---------------------------------------------------------------------------
+  cart-service:
+    build:
+      context: ./cart-service
+      dockerfile: Dockerfile
+    image: blinkit/cart-service:1.0.0
+    container_name: cart-service
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-cart:5432/blinkit_cart
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET}
+      PRODUCT_SERVICE_BASE_URL: http://product-service:8082
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    depends_on:
+      postgres-cart:
+        condition: service_healthy
+      product-service:
+        condition: service_started
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # order-service — validates JWTs and forwards the Authorization header on
+  # every outbound call to cart-service / product-service.
+  # ---------------------------------------------------------------------------
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
+    image: blinkit/order-service:1.0.0
+    container_name: order-service
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-orders:5432/blinkit_orders
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET}
+      CART_SERVICE_BASE_URL: http://cart-service:8083
+      PRODUCT_SERVICE_BASE_URL: http://product-service:8082
+      INTERNAL_SERVICE_JWT: ${INTERNAL_SERVICE_JWT:-}
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8084/actuator/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    depends_on:
+      postgres-orders:
+        condition: service_healthy
+      cart-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # payment-service — validates JWTs and forwards the Authorization header on
+  # every outbound call to order-service (see OrderServiceClient).
+  # Two-phase: /create validates the order, /process simulates settlement and
+  # patches the order's status (SUCCESS -> PAID, FAILED -> FAILED).
+  # ---------------------------------------------------------------------------
+  payment-service:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+    image: blinkit/payment-service:1.0.0
+    container_name: payment-service
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-payment:5432/blinkit_payments
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET}
+      ORDER_SERVICE_BASE_URL: http://order-service:8084
+      PAYMENT_SUCCESS_RATE_PERCENT: ${PAYMENT_SUCCESS_RATE_PERCENT:-80}
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8085/actuator/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    depends_on:
+      postgres-payment:
+        condition: service_healthy
+      order-service:
+        condition: service_started
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # ai-recommendation-service — FastAPI (Python 3.12). Calls product-service
+  # for the catalogue snapshot, caches results in Redis under the `reco:` key
+  # prefix. Forwards inbound Authorization header to product-service.
+  # ---------------------------------------------------------------------------
+  ai-recommendation-service:
+    build:
+      context: ./ai-recommendation-service
+      dockerfile: Dockerfile
+    image: blinkit/ai-recommendation-service:1.0.0
+    container_name: ai-recommendation-service
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      SERVICE_NAME: ai-recommendation-service
+      SERVICE_PORT: 8090
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PRODUCT_SERVICE_BASE_URL: http://product-service:8082
+      PRODUCT_SERVICE_TIMEOUT_SECONDS: 5
+      PRODUCT_SERVICE_PAGE_SIZE: 100
+      INTERNAL_SERVICE_JWT: ${INTERNAL_SERVICE_JWT:-}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-reco}
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-auto}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8090/health/liveness || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      redis:
+        condition: service_healthy
+      product-service:
+        condition: service_started
+    networks:
+      - blinkit-net
+
+  # ---------------------------------------------------------------------------
+  # api-gateway — Spring Cloud Gateway. Single ingress for the React frontend.
+  # Pre-validates JWTs against the shared HS512 secret (defence in depth — each
+  # downstream service still validates independently). Per-IP rate limit via
+  # Redis. CORS allows http://localhost:5173 (Vite) and :3000 (CRA).
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    image: blinkit/api-gateway:1.0.0
+    container_name: api-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-100}
+      AUTH_SERVICE_URL: http://auth-service:8081
+      PRODUCT_SERVICE_URL: http://product-service:8082
+      CART_SERVICE_URL: http://cart-service:8083
+      ORDER_SERVICE_URL: http://order-service:8084
+      PAYMENT_SERVICE_URL: http://payment-service:8085
+      AI_RECOMMENDATION_SERVICE_URL: http://ai-recommendation-service:8090
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+      cart-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      payment-service:
+        condition: service_started
+      ai-recommendation-service:
+        condition: service_started
+    networks:
+      - blinkit-net
+
+volumes:
+  auth_postgres_data:
+  product_postgres_data:
+  cart_postgres_data:
+  order_postgres_data:
+  payment_postgres_data:
+  redis_data:
+
+networks:
+  blinkit-net:
+    driver: bridge
+    name: blinkit-net

@@ -1,0 +1,60 @@
+# =============================================================================
+# product-service — standalone Compose file
+# -----------------------------------------------------------------------------
+# Runs product-service + its dedicated Postgres in isolation. For the full
+# platform (auth + product + cart + their DBs on a shared network) use the
+# root-level docker-compose.platform.yml instead.
+#
+# Secrets are sourced from a sibling `.env` file (copy from
+# ../.env.example). JWT_SECRET MUST match the value used by auth-service.
+# =============================================================================
+
+services:
+  postgres-products:
+    image: postgres:16-alpine
+    container_name: blinkit-postgres-products
+    environment:
+      POSTGRES_DB: blinkit_products
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_products_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d blinkit_products"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blinkit-net
+
+  product-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: product-service
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-products:5432/blinkit_products
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # MUST be the exact same secret used by auth-service and cart-service.
+      JWT_SECRET: ${JWT_SECRET}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
+    depends_on:
+      postgres-products:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - blinkit-net
+
+volumes:
+  postgres_products_data:
+
+networks:
+  blinkit-net:
+    driver: bridge
+    name: blinkit-net

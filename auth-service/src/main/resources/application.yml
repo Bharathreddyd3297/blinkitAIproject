@@ -1,0 +1,94 @@
+# =============================================================================
+# auth-service — Spring Boot configuration
+# -----------------------------------------------------------------------------
+# All secrets and externally-injected values are read from environment
+# variables. For local development the workspace-root .env (copied from
+# .env.example) is loaded by Docker Compose. For Kubernetes / AKS deployment
+# the same env vars will be projected from Kubernetes Secrets — no code or
+# config changes required.
+# =============================================================================
+
+spring:
+  application:
+    name: auth-service
+
+  datasource:
+    # In containerised deployments SPRING_DATASOURCE_URL is set to point at
+    # the auth-postgres service (e.g. jdbc:postgresql://auth-postgres:5432/blinkit_auth).
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/blinkit_auth}
+    username: ${SPRING_DATASOURCE_USERNAME:${POSTGRES_USER:postgres}}
+    password: ${SPRING_DATASOURCE_PASSWORD:${POSTGRES_PASSWORD:postgres}}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        jdbc:
+          batch_size: 20
+          fetch_size: 50
+    show-sql: false
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: ${SERVER_PORT:8081}
+  servlet:
+    context-path: /
+  error:
+    include-message: always
+    include-binding-errors: always
+
+# -----------------------------------------------------------------------------
+# JWT / shared platform authentication
+# -----------------------------------------------------------------------------
+# auth.jwt.secret MUST resolve to the SAME value across auth-service,
+# product-service and cart-service. The JWT_SECRET env var is the source of
+# truth — the fallback below is a safe HS512-length default for local dev
+# only and MUST NEVER be used in production.
+#
+# Production sourcing (in order of preference):
+#   1. Kubernetes Secret mounted as JWT_SECRET env var
+#   2. Azure Key Vault via CSI driver (workload identity)
+#   3. Azure DevOps variable group (CI/CD only)
+# -----------------------------------------------------------------------------
+auth:
+  jwt:
+    secret: ${JWT_SECRET:dGhpcy1pcy1hLXZlcnktbG9uZy1zZWNyZXQta2V5LWZvci1ITUFDLVNIQS01MTItYWxnb3JpdGhtLW1pbmltdW0tNjQtYnl0ZXMtbG9uZy1mb3ItcHJvZHVjdGlvbi11c2U=}
+    expiration: ${JWT_EXPIRATION:86400000}
+
+logging:
+  level:
+    root: INFO
+    com.blinkit.authservice: DEBUG
+    org.springframework.security: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %logger{36} - %msg%n"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
