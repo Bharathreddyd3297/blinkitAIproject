@@ -1,0 +1,14 @@
+# ============================================================================
+# Blinkit AI Recommendation Service — DEV / TEST dependencies
+# ----------------------------------------------------------------------------
+# These are NEVER installed into the production runtime image. They live
+# in a separate file so the runtime venv stays as small as possible.
+#
+# Install locally with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+# ============================================================================
+
+pytest>=8.3,<9.0
+pytest-asyncio>=0.24,<0.25
+respx>=0.21,<0.22
+fakeredis>=2.24,<3.0

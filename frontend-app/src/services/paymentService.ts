@@ -70,11 +70,25 @@ export const paymentService = {
   createIntent: (orderTotal: number, orderId?: string | number, paymentMethod = 'UPI') =>
     withMockFallback(
       async () => {
-        if (orderId === undefined || orderId === null) {
-          throw { status: 0, message: 'createIntent requires orderId — cannot reach backend without it' };
+        // Fail loudly if we don't have a real numeric orderId. Number() silently
+        // converts "ord_MOCK_…" or undefined to NaN; JSON.stringify then writes
+        // it as `null` and the backend's @NotNull validator rejects with
+        // "orderId is required" — a confusing 400 that hides the real cause
+        // (a stale bundle, a mock-fallback order, etc.). Throw an ApiError
+        // (non-zero status) so withMockFallback bubbles it to the UI instead
+        // of falling back to the mock path.
+        const numericOrderId = Number(orderId);
+        if (!Number.isFinite(numericOrderId) || numericOrderId <= 0) {
+          throw {
+            status: 422,
+            message:
+              'Cannot start payment without a valid order id. ' +
+              'Place the order first, then call createIntent with its numeric id.',
+            code: 'INVALID_ORDER_ID',
+          };
         }
         const payment = await api.post<BackendPayment>('/payments/create', {
-          orderId: Number(orderId),
+          orderId: numericOrderId,
           paymentMethod,
         });
         return mapPaymentToIntent(payment);

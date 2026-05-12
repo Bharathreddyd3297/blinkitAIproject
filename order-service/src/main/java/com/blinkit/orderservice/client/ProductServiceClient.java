@@ -81,7 +81,7 @@ public class ProductServiceClient {
                                     .flatMap(body -> Mono.error(new ProductServiceException(
                                             "Product service server error: " + body))))
                     .bodyToMono(new ParameterizedTypeReference<ApiResponse<ProductResponse>>() {})
-                    .timeout(Duration.ofSeconds(5))
+                    .timeout(Duration.ofSeconds(10))
                     .block();
             return envelope != null ? envelope.getData() : null;
         } catch (ProductNotFoundException | ProductServiceException ex) {
@@ -133,7 +133,7 @@ public class ProductServiceClient {
                                     .flatMap(body -> Mono.error(new ProductServiceException(
                                             "Inventory adjust server error: " + body))))
                     .toBodilessEntity()
-                    .timeout(Duration.ofSeconds(5))
+                    .timeout(Duration.ofSeconds(10))
                     .block();
         } catch (ProductNotFoundException | ProductServiceException ex) {
             throw ex;

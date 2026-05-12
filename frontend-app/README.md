@@ -74,9 +74,43 @@ A production-grade, cinematic frontend for the Blinkit cloud-native ecommerce pl
 
 The frontend's contract is the gateway. Direct service URLs are forbidden — the gateway is where auth, rate limits, and tracing live. Swap a backend service tomorrow and the frontend never knows.
 
+### Container runtime
+
+```
+Browser
+   │
+   │  HTTP  (same origin: http://localhost)
+   ▼
+┌─────────────────────────────────────────────┐
+│  frontend-app container (nginx:alpine)      │
+│                                             │
+│  • serves dist/ (immutable assets + SPA)    │
+│  • reverse-proxies /api/** → api-gateway    │
+│  • applies security headers + gzip          │
+└────────────────────┬────────────────────────┘
+                     │  Docker DNS:  http://api-gateway:8080
+                     ▼
+              ┌──────────────┐
+              │  api-gateway │  (JWT pre-validate, CORS, rate-limit)
+              └──────┬───────┘
+                     │
+                     ▼
+            6 microservices  +  Redis  +  5 Postgres
+            (auth, product, cart, order, payment, AI)
+```
+
+Two ways to run the frontend:
+
+1. **Vite dev server** (`npm run dev` → `http://localhost:5173`) — HMR, instant rebuilds. The bundle uses `VITE_API_BASE_URL=http://localhost:8080`, so the browser talks to the gateway directly (CORS is configured to allow `:5173`). This is the daily-driver loop.
+2. **Containerised nginx** (`docker compose -f docker-compose.platform.yml up frontend-app` → `http://localhost`) — production-style. The bundle is built with **`VITE_API_BASE_URL=""`** so axios issues relative URLs (`/api/auth/login`, …). nginx in this container receives them and `proxy_pass`es into `http://api-gateway:8080` over the Docker bridge network. The browser only ever sees one origin, so there is no CORS preflight, and the gateway port doesn't even need to be exposed on the host. The container that nginx is running in resolves `api-gateway` via Docker DNS — never `localhost`.
+
+Both modes can run simultaneously: Vite on 5173 + nginx on 80. They use different bundles and don't interfere.
+
 ---
 
 ## 2. Quick start
+
+### Dev server (Vite, HMR)
 
 ```bash
 # 1. Install
@@ -94,19 +128,81 @@ npm run build
 npm run preview      # smoke-test the production bundle locally
 ```
 
+### Containerised (production-style, nginx)
+
+```bash
+# From the WORKSPACE ROOT, not from frontend-app/:
+cd ..
+docker compose -f docker-compose.platform.yml up --build -d
+```
+
+That one command builds and starts **14 containers**: 5 Postgres + Redis + 6 backend services + api-gateway + this nginx frontend. The SPA lands at **`http://localhost`** (host port 80). Health is exposed at `docker inspect -f '{{.State.Health.Status}}' frontend-app`.
+
+Host port can be overridden if 80 is taken on your machine — set `FRONTEND_HOST_PORT=8088` in `.env` and the SPA will live at `http://localhost:8088`.
+
+The container is a **multi-stage build**:
+
+| Stage | Image | What it does | What it leaves behind |
+|---|---|---|---|
+| `builder` | `node:20-alpine` | `npm ci` (deterministic), then `npm run build` (tsc + vite). All `VITE_*` env vars are passed in as `ARG` so they are inlined into the bundle at compile time. | A pristine `dist/` directory. |
+| `runtime` | `nginx:1.27-alpine` | Copies `dist/` into `/usr/share/nginx/html` and drops in [`deploy/nginx.conf`](deploy/nginx.conf). No node_modules, no source, no `.env`, no Dockerfile, no tsbuildinfo. | A 75 MB image that serves the SPA + reverse-proxies `/api/**`. |
+
+### Why same-origin, not direct browser → gateway?
+
+The production build sets **`VITE_API_BASE_URL=""`** (see [`.env.production`](.env.production)). axios uses relative URLs (`/api/auth/login`, …). The browser sees those as same-origin against `http://localhost`. nginx in this container then `proxy_pass`es them into `http://api-gateway:8080` over the Docker bridge network:
+
+```
+fetch('/api/auth/login')
+       │
+       ▼  (same-origin → no CORS preflight)
+   nginx :80  ──proxy_pass──►  api-gateway :8080  ──►  auth-service :8081
+```
+
+Wins:
+- **No CORS** — same-origin removes preflight entirely.
+- **Gateway is not exposed externally** — host port 8080 stays internal-only in a true production deployment. Only `:80` (the nginx layer) needs to be public.
+- **One image, many environments** — to bypass the proxy and front the gateway with Azure App Gateway / ACR on AKS, just rebuild with `--build-arg VITE_API_BASE_URL=https://api.blinkit.example.com`. Same image, different inline base URL.
+
+### Healthcheck
+
+`docker compose` polls the container with:
+
+```
+wget -qO- http://localhost/ | grep -q '<title>Blinkit'
+```
+
+Healthy means nginx is binding port 80 AND serving the real SPA shell (not a 50x error page). The first health probe runs 15s after start; subsequent probes run every 30s.
+
+### Image hygiene checks (already enforced)
+
+| Concern | Enforced by | Verify with |
+|---|---|---|
+| No `node_modules` in runtime image | `.dockerignore` + multi-stage `COPY --from=builder /app/dist …` only | `docker exec frontend-app ls /app` → no such directory |
+| No source files in runtime image | Same | `docker exec frontend-app ls /usr/share/nginx/html` → only `index.html`, `assets/`, `favicon.svg`, `50x.html` |
+| No `.env` baked into runtime | `.dockerignore` excludes `.env`, `.env.local`, `.env.*.local`; only `.env.production` and `.env.example` are explicitly allowed through | `docker exec frontend-app find / -name ".env*" 2>/dev/null` → empty |
+| Small image | nginx:alpine base + ~1.5 MB of static dist | `docker images blinkit/frontend-app:1.0.0` → ~75 MB |
+
 ### Environment variables
 
-| Variable                  | Default                  | Purpose                                                |
-|---------------------------|--------------------------|--------------------------------------------------------|
-| `VITE_API_BASE_URL`       | `http://localhost:8080`  | Gateway URL — the **only** backend the FE talks to.    |
-| `VITE_API_TIMEOUT`        | `15000`                  | Axios timeout (ms).                                    |
-| `VITE_AUTH_STORAGE_KEY`   | `blinkit.auth`           | LocalStorage key for the JWT session.                  |
-| `VITE_APP_NAME`           | `Blinkit`                | Surfaced in footer / debug menus.                      |
-| `VITE_APP_VERSION`        | `0.1.0`                  | Build identification.                                  |
-| `VITE_APP_ENV`            | `development`            | One of `development` / `staging` / `production`.       |
-| `VITE_ENABLE_3D`          | `true`                   | Master kill-switch for all R3F surfaces.               |
-| `VITE_ENABLE_PARTICLES`   | `true`                   | Disable just the ambient particle backdrop.            |
-| `VITE_ENABLE_DEVTOOLS`    | `true`                   | Toggle Redux DevTools.                                 |
+Vite reads `.env` for local dev (`npm run dev`) and `.env.production` for the `vite build` step (which is what the Docker image's builder stage runs). Both sets of values are inlined into the bundle at build time — they never reach the browser as live env vars.
+
+| Variable                  | Dev default              | Prod (container) default | Purpose                                                |
+|---------------------------|--------------------------|--------------------------|--------------------------------------------------------|
+| `VITE_API_BASE_URL`       | `http://localhost:8080`  | `""` *(empty)*           | Gateway URL. Empty in the container means axios uses relative URLs and nginx proxies `/api/**` to the gateway. |
+| `VITE_API_TIMEOUT`        | `15000`                  | `15000`                  | Axios timeout (ms).                                    |
+| `VITE_AUTH_STORAGE_KEY`   | `blinkit.auth`           | `blinkit.auth`           | LocalStorage key for the JWT session.                  |
+| `VITE_APP_NAME`           | `Blinkit`                | `Blinkit`                | Surfaced in footer / debug menus.                      |
+| `VITE_APP_VERSION`        | `0.1.0`                  | `0.1.0`                  | Build identification.                                  |
+| `VITE_APP_ENV`            | `development`            | `production`             | Drives feature flags + telemetry.                      |
+| `VITE_ENABLE_3D`          | `true`                   | `true`                   | Master kill-switch for all R3F surfaces.               |
+| `VITE_ENABLE_PARTICLES`   | `true`                   | `true`                   | Disable just the ambient particle backdrop.            |
+| `VITE_ENABLE_DEVTOOLS`    | `true`                   | `false`                  | Redux DevTools.                                        |
+
+Compose-level overrides (set in the workspace-root `.env`):
+
+| Variable               | Default | Purpose                                                                  |
+|------------------------|---------|--------------------------------------------------------------------------|
+| `FRONTEND_HOST_PORT`   | `80`    | Host port mapped to the container's port 80. Override when 80 is in use. |
 
 ---
 
@@ -790,30 +886,64 @@ Azure Static Web Apps `staticwebapp.config.json`:
 }
 ```
 
-### Containerised (AKS-ready)
+### Containerised (the production runtime that ships with this repo)
 
-A minimal multi-stage `Dockerfile`:
+The repo ships a real, multi-stage [`Dockerfile`](Dockerfile) and a real [`deploy/nginx.conf`](deploy/nginx.conf) — both already wired into [`docker-compose.platform.yml`](../docker-compose.platform.yml) at the workspace root. To start the whole platform (frontend + 6 backend services + 5 Postgres + Redis + gateway) in one command:
 
-```dockerfile
-# ---- build stage ----
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund
-COPY . .
-ARG VITE_API_BASE_URL=https://api.blinkit.example.com
-ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
-RUN npm run build
-
-# ---- runtime stage ----
-FROM nginx:1.27-alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
-HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://localhost/ || exit 1
+```bash
+# from the workspace root
+docker compose -f docker-compose.platform.yml up --build -d
+# →  Frontend: http://localhost
+# →  Gateway:  http://localhost:8080   (still exposed for direct curl/debugging)
+# →  Vite:     run separately on :5173 if you want HMR
 ```
 
-> **Build-time vs run-time env vars:** Vite inlines `VITE_*` env vars at build time. To switch the gateway URL between environments without rebuilding, either build per-env or use a runtime config shim served from `/runtime-config.js`.
+The container architecture:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ frontend-app container  (nginx:1.27-alpine, 75 MB)  │
+│                                                     │
+│  ┌──────────────────────────────────────────────┐   │
+│  │ /usr/share/nginx/html       (the dist/)      │   │
+│  │   index.html  (no-store)                     │   │
+│  │   assets/*   (Cache-Control: immutable, gz)  │   │
+│  │   favicon.svg                                │   │
+│  └──────────────────────────────────────────────┘   │
+│                                                     │
+│  /api/**           ──► proxy_pass  api-gateway:8080 │
+│  /actuator/**      ──► proxy_pass  api-gateway:8080 │
+│  /assets/*         ──► static                       │
+│  everything else   ──► SPA fallback to /index.html  │
+└──────────────────────────┬──────────────────────────┘
+                           │ Docker DNS: api-gateway
+                           ▼
+                  ┌──────────────────────┐
+                  │ api-gateway :8080    │
+                  └────────────┬─────────┘
+                               │
+                               ▼
+            6 microservices  +  Redis  +  5 Postgres
+```
+
+Key choices (all already implemented in this repo):
+
+| Concern | Implementation |
+|---|---|
+| **Multi-stage** | `node:20-alpine` → `nginx:1.27-alpine`. Final image has no node_modules, no source, no `.env`, no Dockerfile, no tsbuildinfo. |
+| **Deterministic install** | `npm ci --no-audit --no-fund` in the builder stage. |
+| **Build args** | Every `VITE_*` is a `Dockerfile` `ARG` with a safe default. Override at build time: `docker compose build --build-arg VITE_API_BASE_URL=https://api.blinkit.example.com frontend-app`. |
+| **SPA fallback** | `try_files $uri $uri/ /index.html` for all non-`/api`, non-`/assets` routes. |
+| **`/assets/*` 404 (not SPA)** | A missing hashed asset returns 404 instead of HTML — otherwise browsers would parse `index.html` as a JS module and crash silently. |
+| **Same-origin /api** | nginx `proxy_pass http://api-gateway:8080` over the Docker bridge network. No CORS preflights, gateway port does not need to be public. |
+| **Auth header passthrough** | `proxy_set_header` does not touch `Authorization`; bearer tokens travel unchanged. |
+| **Gzip** | Enabled for `text/*`, `application/javascript`, `application/json`, `image/svg+xml`, fonts. `Vary: Accept-Encoding`. |
+| **Cache strategy** | `index.html` → `no-store`. Hashed `/assets/*` → `public, max-age=31536000, immutable`. |
+| **Security headers** | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: geolocation=(), microphone=(), camera=()`, `X-XSS-Protection: 0`, `server_tokens off`. |
+| **Healthcheck** | `wget -qO- http://localhost/ \| grep -q '<title>Blinkit'` — proves nginx is binding and serving the real SPA. |
+| **Host port** | Defaults to `80` (cleanest URL: `http://localhost`). Override with `FRONTEND_HOST_PORT` in `.env`. |
+
+> **Build-time vs run-time env vars:** Vite inlines `VITE_*` at build time. The bundle that ships in the image is bound to the `VITE_API_BASE_URL` it was built with. To target a different gateway, rebuild with a new `--build-arg`. The empty default (`""`) is the one this image is built for: same-origin via the nginx proxy.
 
 ### CI/CD checklist
 

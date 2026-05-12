@@ -1,0 +1,58 @@
+# Build-time .dockerignore for the Blinkit frontend image.
+#
+# Anything matched here is excluded from the Docker build context, which means:
+#   - faster cold builds (no 500MB node_modules upload to the daemon),
+#   - smaller layer cache misses,
+#   - no secrets / build output / IDE noise sneaking into the image.
+#
+# The runtime stage already strips everything except `dist/`, so this is purely
+# about the COPY into the *builder* stage.
+
+# Dependencies — we always reinstall via `npm ci` inside the builder.
+node_modules
+
+# Build output — produced inside the image, never read from the host.
+dist
+dist-ssr
+build
+.vite
+
+# Local env files. `.env.production` IS shipped (it carries the empty
+# VITE_API_BASE_URL that switches axios to same-origin) — explicitly
+# un-ignore it below.
+.env
+.env.local
+.env.*.local
+!.env.production
+!.env.example
+
+# Logs / debug
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+*.log
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.swp
+
+# TS incremental build artifacts
+*.tsbuildinfo
+
+# Test / coverage
+coverage
+.nyc_output
+
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Docs — not needed inside the image
+README.md

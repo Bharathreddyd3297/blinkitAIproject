@@ -1,9 +1,18 @@
 # ============================================================================
-# Blinkit AI Recommendation Service — runtime + dev dependencies
+# Blinkit AI Recommendation Service — RUNTIME dependencies only
 # ----------------------------------------------------------------------------
 # Pinned to compatible upper bounds. numpy is held below 2.x because some
 # transitive dependencies (notably torch wheels for sentence-transformers
 # on certain platforms) are still on 1.x ABI.
+#
+# torch is intentionally NOT pinned here — the Dockerfile installs the
+# CPU-only PyTorch wheel from https://download.pytorch.org/whl/cpu BEFORE
+# pip processes this file. That way sentence-transformers picks up the
+# already-installed CPU torch and we avoid pulling ~4.5 GB of nvidia/cuda/
+# triton wheels we don't need (we're not running on GPU pods).
+#
+# Test dependencies live in requirements-dev.txt — never installed into
+# the production image.
 # ============================================================================
 
 # --- Web framework ---
@@ -20,13 +29,9 @@ httpx>=0.27,<0.28
 redis>=5.1,<6.0
 
 # --- ML / similarity ---
+# sentence-transformers is the primary embedding backend; scikit-learn provides
+# the TF-IDF fallback. pandas was previously listed but is unused anywhere in
+# `app/` — removing it saves ~75 MB at no functional cost.
 sentence-transformers>=3.0,<4.0
 scikit-learn>=1.5,<2.0
-pandas>=2.2,<3.0
 numpy>=1.26,<2.0
-
-# --- Tests ---
-pytest>=8.3,<9.0
-pytest-asyncio>=0.24,<0.25
-respx>=0.21,<0.22
-fakeredis>=2.24,<3.0

@@ -4,11 +4,13 @@
 # Stage 1: builder — installs all Python deps into a virtualenv.
 # Stage 2: runtime — slim runtime, non-root user, virtualenv copied from builder.
 #
-# The sentence-transformers / torch wheels make the runtime image large
-# (~1.5 GB). For environments that only need TF-IDF (CI, dev preview),
-# build with --build-arg EMBEDDING_BACKEND=tfidf and the heavy deps can
-# be skipped at install time by trimming requirements.txt — left as a
-# follow-up so the default image matches the documented spec.
+# AKS-relevant size note: an earlier build of this image was 8.6 GB because
+# `pip install sentence-transformers` pulled the default CUDA-enabled PyTorch
+# wheel (1.2 GB), plus nvidia/* CUDA libraries (2.7 GB) and triton (641 MB).
+# We don't run on GPU pods, so all of that is dead weight. This Dockerfile
+# now installs the CPU-only PyTorch wheel FIRST from the pytorch.org CPU
+# index, so sentence-transformers picks up the already-installed CPU torch
+# and never sees CUDA at all. The runtime image shrinks ~5x.
 # =============================================================================
 
 # ----- builder ---------------------------------------------------------------
@@ -19,7 +21,9 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Build deps for scikit-learn / numpy / torch wheels.
+# Build deps for scikit-learn / numpy wheels. `build-essential` is only used
+# at install time and never reaches the runtime image (the runtime stage
+# COPYs `/opt/venv` only).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -34,7 +38,21 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt ./
 RUN pip install --upgrade pip \
-    && pip install -r requirements.txt
+    # Install CPU-only torch FIRST from pytorch.org's CPU index. Pinning to
+    # 2.x keeps it compatible with sentence-transformers' install_requires.
+    # `--index-url` (not --extra-index-url) ensures pip will NOT silently
+    # resolve to the default PyPI torch wheel (which is CUDA-enabled).
+    && pip install --index-url https://download.pytorch.org/whl/cpu \
+        "torch>=2.2,<3.0" \
+    # Now install the rest of the runtime deps. sentence-transformers sees
+    # a satisfied torch dependency and does NOT re-resolve a CUDA wheel.
+    && pip install -r requirements.txt \
+    # Strip cached __pycache__ + tests bundled into wheels. Shaves ~80MB
+    # without changing behaviour (Python regenerates .pyc on first import,
+    # which we accept because container start latency dominates anyway).
+    && find /opt/venv -type d -name "__pycache__"  -prune -exec rm -rf {} + \
+    && find /opt/venv -type d -name "tests"        -prune -exec rm -rf {} + \
+    && find /opt/venv -type d -name "test"         -prune -exec rm -rf {} +
 
 # ----- runtime ---------------------------------------------------------------
 FROM python:3.12-slim AS runtime
